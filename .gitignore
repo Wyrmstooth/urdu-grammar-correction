@@ -1,4 +1,3 @@
-# Model outputs
 __pycache__/
 *.pyc
 *.egg-info/
@@ -11,16 +10,18 @@ logs/
 !val.csv
 !test.csv
 !test_eval.csv
-
-# Virtual envs
+urdu_gec_dataset_hf/
+checkpoint_dir/
+*.png
+*.csv
+!train.csv
+!val.csv
+!test.csv
+!test_eval.csv
 venv/
 env/
 .venv/
-
-# OS
 .DS_Store
 Thumbs.db
-
-# IDE
 .vscode/
 .idea/
