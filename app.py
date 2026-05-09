@@ -1,114 +1,147 @@
 # -*- coding: utf-8 -*-
 """
-Urdu Grammar Correction - Web UI
-Run: python app.py
-Opens at http://127.0.0.1:7860
+Urdu Grammar Correction - Dark Modern Web UI
 """
 import gradio as gr
 import torch
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
-# ─── Load Model ───
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from peft import PeftModel
+
 MODEL_PATH = "./urdu_gec_model/final"
+BASE_MODEL = "google/mt5-small"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-print(f"Loading model on {device}...")
+print("Loading model...")
+base_model = AutoModelForSeq2SeqLM.from_pretrained(BASE_MODEL)
+model = PeftModel.from_pretrained(base_model, MODEL_PATH)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_PATH).to(device)
-model.eval()
-print("Model loaded!")
+model = model.to(device).eval()
+print("Model ready")
 
-# ─── Correction Function ───
-def correct_urdu(text, num_beams=4):
-    if not text or not text.strip():
-        return "براہ کرم اردو جملہ درج کریں"
-    input_text = "correct grammar: " + text.strip()
-    inputs = tokenizer(input_text, return_tensors="pt", max_length=256, truncation=True).to(device)
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_length=256,
-            num_beams=num_beams,
-            early_stopping=True,
-            no_repeat_ngram_size=3
-        )
-    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+retriever = None
+try:
+    from rag_retriever import UrduGrammarRetriever
+    retriever = UrduGrammarRetriever()
+    print("Retriever ready")
+except Exception as e:
+    print(f"No retriever: {e}")
 
-# ─── Examples ───
-examples = [
-    ["میں کل بازار گیا تھا سبزیاں خریدنے کے لیے"],
-    ["وہ لڑکی بہت اچھا گاتی ہیں"],
-    ["اس نے مجے فون کیا"],
-    ["بچے باہر کھیل رہے ہے"],
-    ["آج کا کھانا بہت لذیذ ہوئی"],
-    ["وہ گھر گیا اور اور پھر واپس آیا"],
-    ["کل رات خوب بارس ہوئی"],
-    ["بچوں نے شور مچایا بہت کمرے میں"],
-    ["وہ ہر روز صبح جوگنگ کرتہ ہے"],
-    ["اس نے مجھ کو کچھ نہیں بتایا"],
+PREFIX = "correct grammar: "
+
+
+def correct(text, beams, use_rag):
+    try:
+        text = text.strip()
+        if not text:
+            return "", ""
+
+        input_text = PREFIX + text
+
+        # Always use clean input - never inject RAG into prompt (confuses model)
+        inputs = tokenizer(input_text, return_tensors="pt", max_length=256, truncation=True).to(device)
+
+        with torch.no_grad():
+            out = model.generate(
+                **inputs, max_length=256, num_beams=int(beams),
+                early_stopping=True, no_repeat_ngram_size=3
+            )
+        correction = tokenizer.decode(out[0], skip_special_tokens=True)
+
+        # RAG: retrieve rules for display only, not injected into model
+        rules_md = ""
+        if use_rag and retriever:
+            _, retrieved = retriever.build_context(text, top_k=3)
+            if retrieved:
+                rules_md = "### Grammar Rules (Reference Only)\n\n"
+                for i, r in enumerate(retrieved, 1):
+                    rule = r["rule"]
+                    rules_md += f"**{i}. {rule['rule_en']}**\n\n"
+                    rules_md += f"Category: `{rule['category']}` | Error: `{rule['error_type']}`\n\n"
+                    rules_md += f"❌ {rule['example_wrong']}  \n✅ {rule['example_right']}\n\n"
+                    rules_md += f"*{rule['explanation']}*\n\n---\n\n"
+
+        return correction, rules_md
+
+    except Exception as e:
+        return f"Error: {e}", ""
+
+
+EXAMPLES = [
+    ("میں کل بازار گیا تھا سبزیاں خریدنے کے لیے", "Word Order"),
+    ("وہ لڑکی بہت اچھا گاتی ہیں", "Verb Agreement"),
+    ("اس نے مجے فون کیا", "Spelling"),
+    ("بچے باہر کھیل رہے ہے", "Plural Verb"),
+    ("وہ گھر گیا اور اور پھر واپس آیا", "Extra Words"),
+    ("کل رات بجلی چلی گئ", "Spelling"),
+    ("میں نے بازار سبزی خریدی", "Missing Words"),
+    ("وہ ہر روز صبح جانچ کرتہ ہے", "Spelling"),
 ]
 
-# ─── UI ───
-with gr.Blocks(title="Urdu Grammar Correction") as app:
-    gr.Markdown("""
-    # 📝 اردو گرامر درستی | Urdu Grammar Correction
-    
-    اپنا اردو جملہ درج کریں اور ماڈل خودکار طریقے سے گرامر کی غلطیاں درست کرے گا۔
-    
-    *Enter an Urdu sentence and the AI will automatically correct grammar errors.*
+CSS = """
+body, .gradio-container { background: #0b0f19 !important; color: #e2e8f0 !important; }
+.block { background: transparent !important; }
+.gr-group { background: #131a2e !important; border: 1px solid #1e293b !important; border-radius: 12px !important; }
+.gr-button-primary {
+    background: linear-gradient(135deg, #3b82f6, #6366f1) !important;
+    border: none !important; font-weight: 700 !important;
+    border-radius: 10px !important; padding: 14px 24px !important;
+    box-shadow: 0 4px 24px rgba(59,130,246,0.35) !important;
+}
+.gr-button-primary:hover { transform: translateY(-2px); }
+.gr-button-secondary {
+    background: transparent !important; border: 2px solid #334155 !important;
+    color: #94a3b8 !important; font-weight: 600 !important; border-radius: 10px !important;
+}
+.gr-button-secondary:hover { border-color: #64748b !important; color: #e2e8f0 !important; }
+textarea {
+    background: #1a2236 !important; border: 2px solid #1e293b !important;
+    border-radius: 10px !important; color: #fbbf24 !important;
+    font-size: 1.25rem !important; padding: 14px !important; line-height: 1.8 !important;
+}
+textarea:focus { border-color: #3b82f6 !important; }
+label { color: #94a3b8 !important; font-weight: 600 !important; }
+"""
+
+
+with gr.Blocks(css=CSS, title="Urdu Grammar Corrector") as app:
+    gr.HTML("""
+    <div style="text-align:center;padding:28px;background:linear-gradient(180deg,#1e3a5f,#0b0f19);border-radius:12px;margin-bottom:16px;border:1px solid #1e293b">
+      <h1 style="color:white;margin:0;font-size:2rem">📝 Urdu Grammar Corrector</h1>
+      <p style="color:#94a3b8;margin:6px 0 0 0">AI-powered grammar correction for Urdu text</p>
+    </div>
     """)
 
+    with gr.Group():
+        gr.Markdown("**Enter Urdu Text**")
+        input_text = gr.Textbox(placeholder="Type here...", lines=3, label="Incorrect Sentence")
+
+        with gr.Row():
+            btn = gr.Button("Correct Grammar", variant="primary")
+            clear_btn = gr.Button("Clear", variant="secondary")
+
+        with gr.Row():
+            beams = gr.Slider(1, 8, value=4, step=1, label="Beam Width")
+            use_rag = gr.Checkbox(True, label="Enable RAG")
+
+    with gr.Group():
+        gr.Markdown("**Corrected Output**")
+        output_text = gr.Textbox(lines=3, interactive=False, label="Corrected Sentence")
+
+    with gr.Group():
+        gr.Markdown("**Grammar Rules**")
+        rag_output = gr.Markdown()
+
+    gr.Markdown("**Examples**")
     with gr.Row():
-        with gr.Column():
-            gr.Markdown("### ✍️ **ان پٹ / Input**")
-            input_text = gr.Textbox(
-                label="غلط جملہ (Incorrect Sentence)",
-                placeholder="یہاں اپنا اردو جملہ لکھیں...",
-                lines=3,
-                elem_classes="input-text",
-            )
-            beams = gr.Slider(1, 8, value=4, step=1, label="Beam Search (زیادہ = بہتر لیکن آہستہ)")
-            btn = gr.Button("🔍 گرامر درست کریں | Correct Grammar", variant="primary", size="lg")
+        for text, label in EXAMPLES:
+            ex_btn = gr.Button(label, variant="secondary", size="sm")
+            ex_btn.click(fn=lambda t=text: t, inputs=[], outputs=[input_text])
 
-        with gr.Column():
-            gr.Markdown("### ✅ **آؤٹ پٹ / Output**")
-            output_text = gr.Textbox(
-                label="درست جملہ (Corrected Sentence)",
-                lines=3,
-                interactive=False,
-                elem_classes="output-text",
-            )
+    btn.click(fn=correct, inputs=[input_text, beams, use_rag], outputs=[output_text, rag_output])
+    input_text.submit(fn=correct, inputs=[input_text, beams, use_rag], outputs=[output_text, rag_output])
+    clear_btn.click(fn=lambda: "", inputs=[], outputs=[input_text])
 
-    btn.click(fn=correct_urdu, inputs=[input_text, beams], outputs=output_text)
-    input_text.submit(fn=correct_urdu, inputs=[input_text, beams], outputs=output_text)
+    gr.HTML('<div style="text-align:center;padding:20px;color:#475569;font-size:0.8rem">mT5-small + LoRA + FAISS RAG</div>')
 
-    gr.Markdown("### 📋 مثالوں سے آزمائیں | Try Examples")
-    gr.Examples(examples=examples, inputs=input_text, fn=correct_urdu, outputs=output_text, cache_examples=False)
-
-    gr.Markdown("""
-    ---
-    ### ℹ️ بارے میں | About
-    
-    یہ ماڈل **mT5-small** کو 8,143 اردو جملوں پر تربیت دے کر بنایا گیا ہے۔  
-    یہ درج ذیل غلطیاں درست کر سکتا ہے:
-    - 🏷️ لفظوں کی ترتیب (Word Order)
-    - 📐 گرامر (Grammar - verb gender, plural, subject-verb agreement)  
-    - ✏️ املا (Spelling)
-    - ➕ فالتو الفاظ (Extra Words)
-    - ➖ غائب الفاظ (Missing Words)
-    
-    **BLEU Score: 81%** | **mT5-small (300M)** | **RTX 5060 GPU**
-    """)
-
-if __name__ == "__main__":
-    app.launch(
-        server_name="127.0.0.1",
-        server_port=7862,
-        share=False,
-        inbrowser=True,
-        theme=gr.themes.Soft(),
-        css="""
-        .output-text textarea { direction: rtl; font-size: 22px !important; }
-        .input-text textarea { direction: rtl; font-size: 22px !important; }
-        """
-    )
+app.launch(server_port=7862, inbrowser=True)

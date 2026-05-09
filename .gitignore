@@ -10,8 +10,11 @@ logs/
 !val.csv
 !test.csv
 !test_eval.csv
+urdu_gec_model/
 urdu_gec_dataset_hf/
 checkpoint_dir/
+offload/
+*.safetensors
 *.png
 *.csv
 !train.csv

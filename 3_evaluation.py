@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Script 3: Inference, Evaluation & Visualization
-Loads trained model, runs comprehensive evaluation with BLEU scores,
+Loads trained LoRA PEFT adapter, runs comprehensive evaluation with BLEU scores,
 generates per-category and per-error-type analysis.
 """
 import json
@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import torch
 from collections import defaultdict, Counter
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from peft import PeftModel, PeftConfig
 import sacrebleu
 import warnings
 warnings.filterwarnings("ignore")
@@ -33,16 +34,22 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
 
 MODEL_PATH = "./urdu_gec_model/final"
-if not __import__("os").path.exists(MODEL_PATH):
-    # Try best checkpoint
-    MODEL_PATH = "./urdu_gec_model/checkpoint-best"
-    if not __import__("os").path.exists(MODEL_PATH):
-        print("ERROR: No model found! Run 2_training.py first.")
-        exit(1)
+BASE_MODEL = "google/mt5-small"
 
-print(f"Loading model from: {MODEL_PATH}")
+if not __import__("os").path.exists(MODEL_PATH):
+    print("ERROR: No model found! Run 2_training.py first.")
+    exit(1)
+
+print(f"Loading base model: {BASE_MODEL}")
+base_model = AutoModelForSeq2SeqLM.from_pretrained(BASE_MODEL)
+
+print(f"Loading LoRA adapter from: {MODEL_PATH}")
+peft_config = PeftConfig.from_pretrained(MODEL_PATH)
+model = PeftModel.from_pretrained(base_model, MODEL_PATH)
+model.print_trainable_parameters()
+
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_PATH).to(device)
+model = model.to(device)
 model.eval()
 
 # ─── 2. Correction Function ───
