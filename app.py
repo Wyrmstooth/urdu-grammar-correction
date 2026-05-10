@@ -29,6 +29,9 @@ except Exception as e:
 
 PREFIX = "correct grammar: "
 
+# Import rule-based post-processing
+from grammar_rules_post import apply_rules
+
 
 def correct(text, beams, use_rag):
     try:
@@ -47,6 +50,9 @@ def correct(text, beams, use_rag):
                 early_stopping=True, no_repeat_ngram_size=3
             )
         correction = tokenizer.decode(out[0], skip_special_tokens=True)
+
+        # Apply rule-based gender/number agreement fixes
+        correction = apply_rules(correction)
 
         # RAG: retrieve rules for display only, not injected into model
         rules_md = ""

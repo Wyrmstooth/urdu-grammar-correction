@@ -13,7 +13,11 @@ logs/
 urdu_gec_model/
 urdu_gec_dataset_hf/
 checkpoint_dir/
+grammar_checkpoint_dir/
+grammar_v2_checkpoint/
+grammar_final_ckpt/
 offload/
+*.zip
 *.safetensors
 *.png
 *.csv
