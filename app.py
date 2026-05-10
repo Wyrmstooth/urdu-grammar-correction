@@ -137,15 +137,19 @@ def correct_with_mt5(text):
 
 
 # ─── Main correction function ───
-def correct(text, use_rag):
+def correct(text, rag_mode):
     if not text or not text.strip():
         return "", "", ""
 
     text = text.strip()
     engine_used = ""
 
-    # 1. Build RAG context from the input sentence
-    rag_context = build_rag_context(text) if use_rag else ""
+    # Determine what's enabled
+    use_api_rag = rag_mode == "RAG Correction"
+    use_rules_display = rag_mode != "No RAG"
+
+    # 1. Build RAG context (for display + API prompt)
+    rag_context = build_rag_context(text) if use_rules_display else ""
 
     # 2. ALWAYS run mT5 first
     mT5_output = correct_with_mt5(text)
@@ -153,18 +157,20 @@ def correct(text, use_rag):
     engine_used = "mT5-small + LoRA"
 
     # 3. Optionally refine with API-based RAG
-    if use_rag:
+    if use_api_rag:
         gemini_refined = correct_with_gemini(text, mT5_output, rag_context)
         if gemini_refined:
             correction = gemini_refined
             engine_used = "mT5 -> API-based RAG Refinement"
+    elif rag_mode == "Only Display Rules":
+        engine_used = "mT5 + RAG Rules (no API)"
 
     # 4. Apply rule-based post-processing (gender/number agreement)
     correction = apply_rules(correction)
 
     # 5. Format RAG rules for display (only if RAG enabled)
     rules_display = ""
-    if use_rag and rag_context and retriever:
+    if use_rules_display and rag_context and retriever:
         results = retriever.retrieve(text, top_k=3)
         if results:
             rules_display = "### Grammar Rules Used\n\n"
@@ -229,7 +235,11 @@ with gr.Blocks(title="Urdu Grammar Corrector") as app:
 
     with gr.Group():
         with gr.Row():
-            use_rag = gr.Checkbox(True, label="Enable API-based RAG Refinement")
+            rag_mode = gr.Radio(
+                choices=["RAG Correction", "Only Display Rules", "No RAG"],
+                value="RAG Correction",
+                label="RAG Mode",
+            )
             engine_info = gr.Markdown("")
 
     with gr.Group():
@@ -255,12 +265,12 @@ with gr.Blocks(title="Urdu Grammar Corrector") as app:
 
     btn.click(
         fn=correct,
-        inputs=[input_text, use_rag],
+        inputs=[input_text, rag_mode],
         outputs=[output_text, rag_output, engine_info]
     )
     input_text.submit(
         fn=correct,
-        inputs=[input_text, use_rag],
+        inputs=[input_text, rag_mode],
         outputs=[output_text, rag_output, engine_info]
     )
     clear_btn.click(fn=lambda: ("", "", ""), inputs=[], outputs=[input_text, output_text, rag_output])
