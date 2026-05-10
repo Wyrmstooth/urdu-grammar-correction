@@ -1,170 +1,139 @@
 # -*- coding: utf-8 -*-
 """
-RAG Retriever - Urdu Grammar Rule Matching
-Matches actual Urdu text to grammar rule examples using character overlap + keyword matching
+RAG Retriever v2 - Smarter rule matching using word overlap + keyword classification.
+No more char-level hallucination.
 """
 import json
+import re
 import numpy as np
-import os
 
 class UrduGrammarRetriever:
     def __init__(self):
         self.rules = self._load_rules()
         self.rule_dict = {r["id"]: r for r in self.rules}
-        self._build_index()
+        print(f"Retriever ready: {len(self.rules)} rules")
 
     def _load_rules(self):
         with open("urdu_grammar_rules.json", "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def _build_index(self):
-        self.examples = [(r["id"], r["example_wrong"]) for r in self.rules]
+    def _extract_words(self, text):
+        """Extract unique words from Urdu text."""
+        return set(re.findall(r'[\u0600-\u06FF\u0750-\u077F]+', text))
 
-        # Multilingual model for semantic matching
-        self.model = None
-        try:
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
-            texts = [ex[1] for ex in self.examples]
-            self.embeddings = self.model.encode(texts, convert_to_numpy=True)
-        except:
-            pass
+    def _word_overlap_score(self, query_words, example_words):
+        """Jaccard similarity on words."""
+        if not query_words or not example_words:
+            return 0.0
+        intersection = query_words & example_words
+        union = query_words | example_words
+        return len(intersection) / len(union) if union else 0.0
 
-        # Character n-gram TF-IDF (best for Urdu script matching)
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        self.tfidf = TfidfVectorizer(
-            analyzer="char_wb",
-            ngram_range=(2, 4),
-            max_features=4000,
-            lowercase=False,
-        )
-        texts = [ex[1] for ex in self.examples]
-        self.tfidf_matrix = self.tfidf.fit_transform(texts)
+    def _keyword_classify(self, text):
+        """Classify what error types are likely present based on keywords."""
+        text_words = set(re.findall(r'[\u0600-\u06FF\u0750-\u077F]+', text))
+        scores = {}
+        
+        # Spelling indicators: common misspelled patterns
+        spelling_patterns = {"مجے", "بارس", "جوگنگ", "گئ", "ہوئ", "لذیذ", "سبز", "کرتہ", "کھیل", "بہت"}
+        # Word order indicators: verb before object patterns  
+        word_order_patterns = {"لیے", "کے", "سے", "پہلے", "بعد"}
+        # Extra words indicators
+        extra_patterns = {"اور", "بہت", "خوب", "بہت زیادہ"}
+        # Missing words indicators
+        missing_patterns = {"میں", "نے", "کو", "سے", "پر", "کا", "کی", "کے"}
+        # Grammar indicators: verb endings
+        grammar_patterns = {"تھا", "تھی", "تھے", "تھیں", "ہے", "ہیں", "ہوں", "رہا", "رہے", "رہی", "رہیں",
+                           "گیا", "گئی", "گئے", "گیا", "کرتا", "کرتے", "کرتی", "جاتا", "جاتے", "جاتی",
+                           "کیا", "کی", "کئے", "ہوا", "ہوئی", "ہوئے"}
 
-        # Error type keywords for direct matching
-        self.keyword_map = {
-            "spelling": ["muj", "maj", "brs", "bars", "mistake", "typo", "incorrect spelling", "galt", "galti"],
-            "extra_words": ["aur aur", "duplicate", "repeat", "extra", "faltu", "redundant", "wah wah", "to to"],
-            "missing_words": ["missing", "ko", "mein", "se", "ne", "case marker", "preposition", "nahi", "gayab"],
-            "word_order": ["word order", "arrangement", "tarteeb", "pehle", "baad", "structure", "sentence order", "gaya tha", "ke liye"],
-            "grammar": ["hain", "hai", "ho", "thi", "tha", "the", "agreement", "gender", "masculine", "feminine", "plural", "singular", "verb", "larki", "bache"],
-        }
+        for category, patterns in [
+            ("spelling", spelling_patterns),
+            ("word_order", word_order_patterns),
+            ("extra_words", extra_patterns),
+            ("missing_words", missing_patterns),
+            ("grammar", grammar_patterns),
+        ]:
+            overlap = text_words & patterns
+            if overlap:
+                scores[category] = len(overlap)
 
-        print(f"Retriever ready: {len(self.rules)} rules, {len(self.examples)} examples")
+        # Boost grammar if no other strong signals (most user sentences are grammar)
+        if not scores:
+            scores["grammar"] = 1
 
-    def _char_overlap(self, query):
-        """Character n-gram Jaccard overlap between query and examples"""
-        def ngrams(s, n=3):
-            return set(s[i:i+n] for i in range(max(0, len(s)-n+1)))
+        return scores
 
-        q_ngrams = ngrams(query) | ngrams(query, 4)
-        scores = []
-        for _, ex in self.examples:
-            e_ngrams = ngrams(ex) | ngrams(ex, 4)
-            if not e_ngrams or not q_ngrams:
-                scores.append(0.0)
-                continue
-            overlap = len(q_ngrams & e_ngrams)
-            scores.append(overlap / max(1, min(len(q_ngrams), len(e_ngrams))))
-        arr = np.array(scores)
-        return arr / arr.max() if arr.max() > 0 else arr
+    def retrieve(self, query, top_k=4):
+        if not query or not query.strip():
+            return []
 
-    def _tfidf_scores(self, query):
-        """Char n-gram TF-IDF similarity"""
-        from sklearn.metrics.pairwise import cosine_similarity
-        q_vec = self.tfidf.transform([query])
-        sims = cosine_similarity(q_vec, self.tfidf_matrix).flatten()
-        sims = np.maximum(sims, 0)
-        return sims / sims.max() if sims.max() > 0 else sims
-
-    def _embedding_scores(self, query):
-        """Multilingual embedding similarity (if model loaded)"""
-        if self.model is None:
-            return np.zeros(len(self.examples))
-        from sklearn.metrics.pairwise import cosine_similarity
-        q_emb = self.model.encode([query], convert_to_numpy=True)
-        sims = cosine_similarity(q_emb, self.embeddings).flatten()
-        sims = np.maximum(sims, 0)
-        return sims / sims.max() if sims.max() > 0 else sims
-
-    def _keyword_boost(self, query, rule_id):
-        """Boost score for rules whose keywords appear in query"""
-        rule = self.rule_dict[rule_id]
-        query_lower = query.lower()
-        boost = 1.0
-        category = rule.get("category", "")
-        if category in self.keyword_map:
-            for kw in self.keyword_map[category]:
-                if kw in query_lower:
-                    boost += 0.15
-        return min(boost, 2.0)
-
-    def retrieve(self, query, top_k=3):
         query = query.strip()
+        query_words = self._extract_words(query)
+        keyword_scores = self._keyword_classify(query)
 
-        # Three scoring methods
-        char_scores = self._char_overlap(query)
-        tfidf_scores = self._tfidf_scores(query)
-        emb_scores = self._embedding_scores(query)
+        scored = []
+        for rule in self.rules:
+            rule_wrong = rule.get("example_wrong", "")
+            rule_right = rule.get("example_right", "")
+            rule_category = rule.get("category", "")
+            error_type = rule.get("error_type", "")
 
-        # Weighted combination
-        combined = 0.5 * char_scores + 0.3 * tfidf_scores + 0.2 * emb_scores
+            wrong_words = self._extract_words(rule_wrong)
+            right_words = self._extract_words(rule_right)
+            all_rule_words = wrong_words | right_words
 
-        # Get unique top-k by rule ID
-        seen = set()
-        scored_rules = []
-        for idx in combined.argsort()[::-1]:
-            rule_id = self.examples[idx][0]
-            if rule_id in seen:
-                continue
-            seen.add(rule_id)
-            base_score = combined[idx]
-            boost = self._keyword_boost(query, rule_id)
-            scored_rules.append((base_score * boost, rule_id))
-            if len(scored_rules) >= top_k * 2:
-                break
+            # Word overlap with both query and rule examples
+            word_score = max(
+                self._word_overlap_score(query_words, wrong_words),
+                self._word_overlap_score(query_words, all_rule_words),
+            )
 
-        scored_rules.sort(key=lambda x: x[0], reverse=True)
+            # Category boost from keyword classification
+            cat_boost = keyword_scores.get(rule_category, 0) * 0.2
+            gen_boost = keyword_scores.get("grammar", 0) * 0.1  # grammar always gets small boost
+
+            # Penalize identity pairs (wrong == right)
+            is_identity = (rule_wrong.strip() == rule_right.strip())
+
+            total_score = word_score * 5.0 + cat_boost * 0.3 + gen_boost * 0.2
+            if is_identity:
+                total_score -= 10.0
+            # Penalize if rule example has fewer than 2 overlapping words with query
+            if len(query_words & all_rule_words) < 2:
+                total_score -= 3.0
+
+            scored.append((total_score, rule))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
 
         results = []
-        for score, rule_id in scored_rules[:top_k]:
-            results.append({
-                "score": float(score),
-                "rule": self.rule_dict[rule_id],
-            })
+        seen_ids = set()
+        for score, rule in scored:
+            if rule["id"] in seen_ids:
+                continue
+            if score <= 2.0:
+                continue
+            seen_ids.add(rule["id"])
+            results.append({"score": float(score), "rule": rule})
+            if len(results) >= top_k:
+                break
+
+        # If we got nothing useful, return top grammar rules
+        if not results:
+            grammar_rules = [r for r in self.rules if r.get("category") == "grammar" and r.get("example_wrong") != r.get("example_right")]
+            for r in grammar_rules[:top_k]:
+                results.append({"score": 0.5, "rule": r})
 
         return results
 
-    def build_context(self, query, top_k=3):
+    def build_context(self, query, top_k=4):
         results = self.retrieve(query, top_k=top_k)
         context = ""
         for i, result in enumerate(results, 1):
             rule = result["rule"]
             context += f"[{i}] {rule['rule_en']}\n"
-            context += f"    Category: {rule['category']} | Error: {rule['error_type']}\n"
             context += f"    Wrong: {rule['example_wrong']}\n"
             context += f"    Right: {rule['example_right']}\n"
             context += f"    Note: {rule['explanation']}\n\n"
         return context, results
-
-
-def test():
-    r = UrduGrammarRetriever()
-    # Test with Romanized for display
-    tests = [
-        "wo larki bohat acha gati hain",
-        "as ne muje fone kiya",
-        "bache bahar khel rahe hai",
-        "wo ghar gaya aur aur phir wapas aaya",
-        "maine bazar sabzi kharidi",
-    ]
-    for t in tests:
-        results = r.retrieve(t, top_k=3)
-        cats = [(res['rule']['category'], res['rule']['error_type']) for res in results]
-        print(f"\n{t}")
-        for i, (c, e) in enumerate(cats, 1):
-            print(f"  {i}. [{c}] {e}")
-
-
-if __name__ == "__main__":
-    test()
