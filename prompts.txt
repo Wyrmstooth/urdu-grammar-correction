@@ -1,0 +1,142 @@
+PROMPTS USED FOR URDU GRAMMAR ERROR CORRECTION PROJECT
+========================================================
+
+--- SESSION 1: ARCHITECTURE & DATA ANALYSIS ---
+
+[USER]
+working on an Urdu GEC project. i have a curated dataset of ~7.5k urdu sentence pairs with grammar errors, each labeled with error_type (word_order, grammar, spelling, extra_words, missing_words, fluency, mixed, awkward) and domain category (daily, news, academic, etc). the data is in GenAI-Dataset.json. im planning to fine-tune mT5-small with LoRA since the vocab covers urdu via SentencePiece and 300M params is manageable on my 8GB GPU. thoughts on whether mT5-small is the right choice vs other multilingual models like mBART or ByT5?
+
+[USER]
+mT5 makes sense since its encoder-decoder and the text-to-text paradigm maps naturally to correction. im thinking LoRA with r=256 targeting all attention projections (q, k, v, o) plus feed-forward (wi, wo) to maximize adaptation capacity while keeping training cheap. alpha=512 gives scaling factor of 2. any reason to go higher on rank or is 256 already overkill for 7.5k samples?
+
+[USER]
+also quick question on the prefix - im using "correct grammar: " prepended to all inputs. does the specific wording affect mT5's task understanding significantly? i've seen papers use "grammar: " or "gec: " but nothing definitive for urdu
+
+[USER]
+before training can you analyze the dataset distribution? i want to understand the class balance. also check for identity pairs (where input == output after stripping prefix) since those provide zero learning signal. i recall the external dataset i merged (mahwizzzz/urdu_error_correction, 200k samples) was all labeled as typing errors - need to verify that's accurate and that i didn't accidentally label grammar corrections as typing
+
+[USER]
+ok the external data is indeed 100% typing errors (garbled text from OCR/mobile keyboards). so the curated portion has: word_order 1704, extra_words 1701, grammar 1370, fluency 1291, missing_words 969, spelling 418, plus tiny mixed/awkward counts. the concern is that when i shuffle and take 50k for training, grammar will only be ~330 samples (0.7%). thats dangerously low for learning gender/number agreement which is morphologically complex in Urdu. should i oversample during training or just accept the imbalance?
+
+[USER]
+for the train/val/test split, im doing 50k/2k/2k from the full shuffled set. but that means val and test are also heavily skewed toward typing. should i create a separate stratified eval set that evenly samples across error types? would give more meaningful per-category BLEU
+
+--- SESSION 2: TRAINING & INITIAL EVALUATION ---
+
+[USER]
+training config: AdamW, lr=5e-4 with linear warmup (500 steps) then linear decay, effective batch 16 (4 per device × 4 grad accum), bf16 mixed precision, gradient checkpointing enabled, max grad norm 1.0, 5 epochs on 50k samples = ~15,625 steps. max sequence length 96 tokens. does this look reasonable or should i push max_len higher? urdu sentences average 18 words but some corrections add words
+
+[USER]
+training done in ~3.5 hours on RTX 5060. loss went from ~4.5 to ~3.9. not amazing convergence but steady downward trend. can you write a comprehensive evaluation script? i want: (1) quick inference test on 8 handpicked samples across error types, (2) stratified BLEU on ~144 samples evenly distributed across error types, (3) full test BLEU on 500 samples from contiguous split, (4) per-error-type and per-category breakdown, (5) bar chart visualizations
+
+[USER]
+results: stratified BLEU 58.71, full test BLEU 44.07. gap makes sense since full test is mostly typing errors which are inherently harder (character-level reconstruction). per error type: extra_words 92.38 (near perfect), grammar 70.43, spelling 66.58, word_order 48.51, typing 45.02, awkward 10.35 (only 3 eval samples though). the awkward and mixed categories are basically untrained with 20 and 23 examples total in the dataset
+
+[USER]
+can you explain why word_order BLEU is only 48.51? is it because rearranging words requires deeper syntactic understanding that mT5-small struggles with? or is the SOV pattern not consistent enough in the training examples? also grammar at 70.43 - what specific grammar patterns is it failing on?
+
+--- SESSION 3: DIAGNOSING GRAMMAR FAILURES ---
+
+[USER]
+i tested the model on these specific sentences and the results are concerning. only 4 out of 20 correct:
+
+[provided list of 20 test sentences with gender/number agreement errors]
+
+patterns im seeing:
+- single auxilary changes work (تھا↔تھے, تھے↔تھا) ✓
+- but when two words need changing (رہا تھے → رہے تھے) it only changes one ✗
+- object-verb agreement after نے completely fails (پولیس نے رپورٹ درج کیا should be کی) ✗
+- feminine subject + masculine verb not corrected (بہن گیا تھی should be گئی تھی) ✗
+- the model sometimes changes the wrong word (changes تھی to تھا instead of گیا to گئی for "میری بہن لاہور گیا تھی")
+
+this looks like the model learned that "changing the last word" is the strategy for grammar correction, rather than learning gender/number agreement rules. is this because the 330 grammar training examples mostly involved single-word auxiliary changes?
+
+[USER]
+the key issue: the model was trained on 96.4% typing errors which are character-level substitutions. it never learned that multiple words need coordinated changes for agreement. the grammar examples it did see (like the 1370 from the curated set) probably had varied patterns that didn't reinforce consistent agreement rules. am i thinking about this right?
+
+[USER]
+can we fix this through training? options im considering:
+1. oversample grammar to ~30-40% of training data and fine-tune for a few more epochs
+2. generate targeted synthetic data covering specific agreement patterns (تھا↔تھے↔تھی↔تھیں, رہا↔رہے↔رہی↔رہیں, گیا↔گئے↔گئی↔گئیں, etc.)
+3. use weighted loss to penalize grammar errors more heavily
+which approach is most likely to work given the time constraint?
+
+--- SESSION 4: ATTEMPTING TO FIX THROUGH TRAINING ---
+
+[USER]
+tried approach 1: built a balanced dataset with grammar oversampled to 8k (from 1.37k, ~6x duplication), plus 8k typing, 1k each for other types. 3 epochs at lr=2e-4 on the existing LoRA adapter. result: still 4/20. the model's output is literally identical to before fine-tuning on all 20 sentences
+
+[USER]
+the training loss decreased from 2.0 to 1.7 but eval loss stayed flat at 0.7051 across all checkpoints. is the eval set (mixed error types) not sensitive enough to grammar improvements? maybe i should use a grammar-only eval set
+
+[USER]
+tried approach 2: generated 1300+ targeted grammar pairs using template-based corruption. for each correct sentence, derive wrong versions by swapping gender/number of verbs and auxiliaries. example: correct "لڑکا اسکول گیا تھا" → corrupt masc_sing to fem_sing → "لڑکا اسکول گئی تھی" (wrong because لڑکا is masc). trained for 3 epochs from the original model at lr=5e-4. still 4/20
+
+[USER]
+at this point im thinking mT5-small with LoRA simply cannot learn morphological agreement patterns from limited data. the model sees tokens not morphemes, and urdu verb agreement depends on fine-grained morphological features (gender, number, person) that are encoded within single tokens. the model would need to learn that the token "گیا" should become "گئی" when the subject is feminine - but this mapping is contextual and the training signal is too weak
+
+[USER]
+what if we accept the model's limitations and instead add a deterministic post-processing layer? the gender/number patterns are regular enough that regex rules could handle them. the model does well on typing, word order, and fluency - let it focus on those and add rules for the 16 grammar patterns it misses
+
+--- SESSION 5: RULE-BASED POST-PROCESSING ---
+
+[USER]
+can you write a rule-based post-processor that handles these specific patterns:
+- ہم + sing verb → plural (تھا→تھے, رہا→رہے, کرتا→کرتے)
+- masc sing subject + plural verb → singular (تھے→تھا)
+- fem sing subject + masc verb → fem (گیا→گئی, رہے→رہی)
+- masc plural + sing verb → plural (رہا تھا→رہے تھے)
+- ergative نے: verb agrees with object not subject (پولیس نے کیا→کی, حکومت نے کئے→کیا)
+- adjective-noun gender (کھانا اچھے→اچھا)
+- natural phenomena are feminine (بارش...ہو گیا→ہو گئی, برف باری ہو رہے ہیں→ہو رہی ہے)
+- first person میں نے + ہیں→ہے
+- compound verbs (وہ آئے تھی→آئی تھی, سن رہی تھا→سن رہی تھی)
+
+the rules should use regex with word boundaries to avoid false matches. also need a list of known masculine/feminine nouns and plural markers
+
+[USER]
+the rules get 19/20 on my test sentences. the one failure is "وہ اسکول دیر سے پہنچتی ہیں" where the model dropped the word "دیر" (late) entirely, and rules can't inject missing content words. this is a model output issue not a grammar agreement issue
+
+[USER]
+critical question: will the rules break the model on the standard test data? if a rule fires on a correctly typed sentence, it could introduce errors. can you run the full evaluation comparing model-only vs model+rules BLEU?
+
+[USER]
+ok so 0 out of 300 full test samples were modified by the rules. overall stratified BLEU went from 60.02 to 59.67 (-0.35, statistical noise). grammar BLEU improved from 70.85 to 71.00 (+0.15). full test BLEU identical at 44.21. the rules are essentially transparent on the normal test data because the typing-dominated test set doesn't trigger the specific gender/number patterns
+
+[USER]
+this is actually the ideal outcome - the rules act as a safety net that catches grammar-specific failures without interfering with the model's strengths (typing correction, word order, fluency). its a hybrid system: model handles the hard stuff, rules handle the deterministic stuff
+
+--- SESSION 6: RAG INTEGRATION FOR CONTEXT-AWARE CORRECTION ---
+
+[USER]
+the current RAG system retrieves grammar rules but only displays them in the UI - they're never actually used for correction. the reasoning was "injecting RAG context into the mT5 prompt confuses the model" which makes sense since mT5 was trained on short prefixes, not multi-paragraph prompts with rules
+
+[USER]
+what if we add an API-based refinement step? use the RAG-retrieved rules as context for an LLM API that reviews the mT5 output and improves it. the pipeline would be: input → mT5 (base correction) → API with RAG context (refinement) → rule-based polish. this way mT5 handles the primary correction and the API handles edge cases using the grammar rules as reference
+
+[USER]
+i have a gemini api key. the free tier supports gemini-2.5-flash which should handle urdu. the prompt should include: original sentence, mT5's correction, and the top 3-4 relevant grammar rules with wrong/right examples. the API just needs to review and fix remaining issues. temperature 0.1 for deterministic output
+
+[USER]
+the RAG retriever is broken though. its using character n-gram TF-IDF + char overlap which is terrible for urdu since it matches on random substrings rather than actual error patterns. for "اس نے مجے فون کیا" it retrieves rules about "بتایا" and indirect objects that are completely irrelevant
+
+[USER]
+can you rewrite the retriever to use word-level Jaccard overlap instead of char n-grams? urdu words are well-segmented so word overlap between the query and the rule's example_wrong/example_right should give much better relevance. also add keyword-based classification to boost the right error category. penalties for identity pairs (rules where example_wrong == example_right)
+
+[USER]
+also the grammar rules JSON itself has problems. rules 14, 17, 28 are identity pairs (wrong==right) which means they provide no useful signal. can you clean all 30 rules, fix the examples, and remove duplicates? each rule should have a genuinely different wrong/right pair
+
+[USER]
+for the UI, want three modes: (1) RAG Correction - full pipeline with API refinement, (2) Only Display Rules - mT5 only but rules shown for reference, (3) No RAG - pure mT5. this lets me compare and also works offline when the API is unavailable
+
+--- SESSION 7: UI, EVALUATION METRICS & DEPLOYMENT ---
+
+[USER]
+build a gradio web UI. requirements: dark theme matching a modern code editor aesthetic, urdu text input with rtl support, corrected output display, grammar rules panel, RAG mode selector (radio buttons), engine info showing which pipeline was used, example sentences as quick-access buttons. the api key should be in .env not hardcoded
+
+[USER]
+for the project report i need sections on: dataset description and preprocessing (error types, categories, splits, sentence length stats), methodology (mT5 architecture, LoRA mathematical formulation with the ΔW = (α/r)·BA decomposition, training hyperparameters, generation strategy with beam search and n-gram penalty), and results with per-error-type and per-category BLEU tables plus analysis
+
+[USER]
+can you verify the generation parameters? im claiming early_stopping=True stops when all beams hit EOS token, and no_repeat_ngram_size=3 prevents trigram repetition. are those accurate descriptions of what HuggingFace's generate() does?
+

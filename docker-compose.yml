@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  urdu-grammar-corrector:
+    build: .
+    container_name: urdu_gec_app
+    ports:
+      - "7862:7862"          # host:container
+    volumes:
+      - ./urdu_gec_model:/app/urdu_gec_model   # mount your trained model
+      - ./urdu_grammar_rules.json:/app/urdu_grammar_rules.json
+      - ./GenAI-Dataset.json:/app/GenAI-Dataset.json
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
